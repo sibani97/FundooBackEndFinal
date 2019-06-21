@@ -1,0 +1,5 @@
+package com.bridgelabz.fundoonotes.redis;
+
+public class RedisService {
+
+}

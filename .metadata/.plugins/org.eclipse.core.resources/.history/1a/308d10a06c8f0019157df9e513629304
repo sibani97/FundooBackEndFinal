@@ -1,0 +1,524 @@
+package com.bridgelabz.fundoonotes.notes.service;
+
+import java.lang.module.FindException;
+//import java.lang.module.FindException;
+import java.time.LocalDate;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collector;
+import java.util.stream.Collectors;
+
+import javax.xml.crypto.Data;
+
+import org.modelmapper.ModelMapper;
+import org.slf4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.PropertySource;
+import org.springframework.core.env.Environment;
+import org.springframework.stereotype.Service;
+
+import com.bridgelabz.fundoonotes.elasticsearch.ElasticsearchServiceImpl;
+import com.bridgelabz.fundoonotes.exception.EmailException;
+import com.bridgelabz.fundoonotes.exception.NoteException;
+import com.bridgelabz.fundoonotes.exception.TokenException;
+import com.bridgelabz.fundoonotes.exception.UserException;
+import com.bridgelabz.fundoonotes.labels.model.Labels;
+import com.bridgelabz.fundoonotes.notes.controller.NoteController;
+import com.bridgelabz.fundoonotes.notes.dto.NoteDto;
+import com.bridgelabz.fundoonotes.notes.model.Notes;
+import com.bridgelabz.fundoonotes.notes.repository.NoteRepository;
+import com.bridgelabz.fundoonotes.redis.RedisService;
+import com.bridgelabz.fundoonotes.response.Response;
+import com.bridgelabz.fundoonotes.response.ResponseToken;
+import com.bridgelabz.fundoonotes.user.model.Email;
+import com.bridgelabz.fundoonotes.user.model.User;
+import com.bridgelabz.fundoonotes.user.repository.UserRepository;
+import com.bridgelabz.fundoonotes.user.service.MymailService;
+import com.bridgelabz.fundoonotes.util.StatusHelper;
+import com.bridgelabz.fundoonotes.util.UserToken;
+
+@Service
+@PropertySource("classpath:fundoo.properties")
+public class NoteServiceImpl implements NoteService {
+	@Autowired
+	private NoteRepository noteRepository;
+	@Autowired
+	private Environment environment;
+	@Autowired
+	private ModelMapper modelMapper;
+	@Autowired
+	private UserRepository userRepository;
+	@Autowired
+	private ResponseToken responseStatus;
+
+	@Autowired
+	private MymailService myMail;
+	@Autowired
+	private UserToken userToken;
+
+	@Autowired
+	private Response response;
+	
+	@Autowired
+	private ElasticsearchServiceImpl elasticImpl;
+	
+	@Autowired
+	private RedisService<Notes> redisService;
+	
+	StatusHelper status = new StatusHelper();
+
+	Logger logger = org.slf4j.LoggerFactory.getLogger(NoteController.class);
+
+	@Override
+	public Response createNote(NoteDto noteDto, String token) {
+
+		if (noteDto.getTitle().length() == 0 && noteDto.getDescription().length() == 0) {
+			throw new NoteException(-200, environment.getProperty("note.error"));
+		} else {
+
+			Notes notes = modelMapper.map(noteDto, Notes.class);
+			
+			
+			
+			
+			Long userid = userToken.tokenVerify(token);
+			//notes.getUser().setUserId(userid);
+			//notes.setUid(userid);
+
+			User user = userRepository.findByUserId(userid)
+					.orElseThrow(() -> new UserException(-200, environment.getProperty("user.invalid.login")));
+			
+			notes.setCreateDate(LocalDate.now());
+			System.out.println(user.getUserId());
+			notes.setUser(user);
+			
+		//	user.getNotes().add(notes);
+		//	userRepository.save(user);
+			
+		    notes = noteRepository.save(notes);
+		    redisService.putMap("redisnoteKey",notes.getNoteId(),notes);
+			elasticImpl.create(notes);
+			
+						
+			response = StatusHelper.statusResponseInfo(environment.getProperty("note.created"), 200);
+			return response;
+		}
+
+	}
+
+	@Override
+	public Response updateNote(Long noteId, NoteDto noteDto, String token) throws UserException {
+		System.out.println("Update the note");
+
+		Long userId = userToken.tokenVerify(token);
+		
+		User user = userRepository.findByUserId(userId)
+				.orElseThrow(() -> new UserException(environment.getProperty("note.not.used")));
+		Notes note = noteRepository.findByNoteId(noteId);
+		
+		System.out.println("User notes"+note);
+
+		System.out.println("Note"+note);
+		note.setTitle(noteDto.getTitle());
+		note.setDescription(noteDto.getDescription());
+		note.setLastUpdateDate(LocalDate.now());
+		
+		user.getNotes().add(note);
+		noteRepository.save(note);
+		redisService.putMap("redisKey", noteId,note);
+		elasticImpl.updateNote(note);
+		
+		
+		response = StatusHelper.statusResponseInfo(environment.getProperty("Note.updated"), 200);
+		return response;
+	}
+
+	@Override
+	public Response trashNote(Long noteId, String token) throws TokenException {
+	logger.info("delete note");
+	Long userId = userToken.tokenVerify(token);
+	
+	User user = userRepository.findByUserId(userId)
+	.orElseThrow(() -> new UserException(environment.getProperty("note.userNote")));
+	List<Notes> notes = user.getNotes();
+	System.out.println(notes);
+	Notes note = user.getNotes().stream().filter(data -> data.getNoteId().equals(noteId)).findFirst().orElseThrow(() -> (new UserException(environment.getProperty("note.invalid"))));
+	
+	boolean noteStatus = note.isTrash();
+	
+	if (noteStatus == true) {
+	note.setTrash(false);
+
+	noteRepository.save(note);
+	
+	elasticImpl.updateNote(note);
+	
+	response = StatusHelper.statusResponseInfo(environment.getProperty("Note.untrash"), 100);
+	return response;
+	} 
+	else
+
+	{
+	note.setTrash(true);
+	
+	noteRepository.save(note);
+	elasticImpl.updateNote(note);
+	response = StatusHelper.statusResponseInfo(environment.getProperty("note.trash"), 300);
+	return response;
+	}
+
+	}
+
+	@Override
+	public List<Notes> getAllUserNotes(String token, boolean trash, boolean archive) throws UserException {
+	Long userId = userToken.tokenVerify(token);
+	User user = userRepository.findByUserId(userId)
+	.orElseThrow(() -> new UserException(environment.getProperty("user.getNotes")));
+	List<Notes> userNote = user.getNotes().stream()
+	.filter(data -> (data.isTrash() == trash && data.isArchive() == archive)).collect(Collectors.toList());
+	System.out.println(userNote);
+	Map<Object, Notes> map = redisService.getMapAsAll("redisKey");
+	System.out.println("map"+map);
+	return userNote;
+	}
+
+	@Override
+	public Response isPing(Long noteId, String token) throws TokenException {
+	logger.info("note isPing");
+	Long userId = userToken.tokenVerify(token);
+	User user = userRepository.findByUserId(userId)
+	.orElseThrow(() -> new UserException(environment.getProperty("note.isPing")));
+	Notes note = user.getNotes().stream().filter(data -> data.getNoteId().equals(noteId)).findFirst()
+	.orElseThrow(() -> new UserException(environment.getProperty("note.invalid")));
+	boolean noteStatus = note.isPin();
+	if (noteStatus == true) {
+	note.setPin(false);
+	noteRepository.save(note);
+	response = StatusHelper.statusResponseInfo(environment.getProperty("Note.notPin"), 400);
+	return response;
+	} else {
+	note.setPin(true);
+	noteRepository.save(note);
+	response = StatusHelper.statusResponseInfo(environment.getProperty("note.pin"), 500);
+	return response;
+	}
+
+	}
+
+	@Override
+	public Response archive(Long noteId, String token) throws TokenException {
+		logger.info("note archive");
+		Long userId = userToken.tokenVerify(token);
+		User user = userRepository.findByUserId(userId)
+				.orElseThrow(() -> new UserException(environment.getProperty("note.archive")));
+		Notes note = user.getNotes().stream().filter(data -> data.getNoteId().equals(noteId)).findFirst()
+				.orElseThrow(() -> new UserException(environment.getProperty("note.invalid")));
+		boolean noteStatus = note.isArchive();
+		if (noteStatus == true) {
+		note.setArchive(false);
+		noteRepository.save(note);
+		response = StatusHelper.statusResponseInfo(environment.getProperty("note.notin.archive"), 505);
+		return response;
+		} 
+		else {
+		note.setArchive(true);
+		noteRepository.save(note);
+		response = StatusHelper.statusResponseInfo(environment.getProperty("note.in.archive"), 507);
+		return response;
+		}
+	}
+
+	@Override
+	public List<Notes> getPingNotes(String token) {
+
+		Long userId = userToken.tokenVerify(token);
+		User user = userRepository.findByUserId(userId)
+				.orElseThrow(() -> new UserException(environment.getProperty("note.getpinNote")));
+		List<Notes> userNotes = (List<Notes>) user.getNotes().stream().filter(data -> data.isPin() == true && data.isTrash()==false && data.isArchive()==false)
+				.collect(Collectors.toList());
+		System.out.println(userNotes);
+		return userNotes;
+
+	}
+	
+	@Override
+	public List<Notes> getunPinNotes(String token) {
+		Long userId=userToken.tokenVerify(token);
+		User user=userRepository.findByUserId(userId)
+				.orElseThrow(() -> new UserException(environment.getProperty("note.getunPinNote")));
+		List<Notes> userNotes = (List<Notes>) user.getNotes().stream().filter(data -> data.isPin() ==false && data.isTrash()==false && data.isArchive()==false )
+		.collect(Collectors.toList());
+		System.out.println(userNotes);
+		
+		return userNotes;
+	}
+
+	@Override
+	public List<Notes> getTrash(String token) {
+		Long userId = userToken.tokenVerify(token);
+		User user = userRepository.findByUserId(userId)
+				.orElseThrow(() -> new UserException(environment.getProperty("note.gettrashNote")));
+		List<Notes> userNotes = (List<Notes>) user.getNotes().stream().filter(data -> data.isTrash() == true )
+				.collect(Collectors.toList());
+		System.out.println(userNotes);
+		return userNotes;
+
+	}
+	@Override
+	public List<Notes> getUnTrash(String token) {
+	Long userId=userToken.tokenVerify(token);
+	User user=userRepository.findByUserId(userId).orElseThrow(()->new UserException(environment.getProperty("note.getUntrashNote")));
+	List<Notes> userNotes = (List<Notes>) user.getNotes().stream().filter(data -> data.isTrash() ==false)
+			.collect(Collectors.toList());
+	System.out.println(userNotes);
+	return userNotes;
+	}
+
+	@Override
+	public List<Notes> getArchive(String token) {
+		Long userId = userToken.tokenVerify(token);
+		User user = userRepository.findByUserId(userId)
+				.orElseThrow(() -> new UserException(environment.getProperty("note.getarchive")));
+		List<Notes> userNotes = (List<Notes>) user.getNotes().stream().filter(data -> data.isArchive() == true )
+				.collect(Collectors.toList());
+		System.out.println(userNotes);
+		return userNotes;
+	}
+	
+	@Override
+	public List<Notes> getUnArchive(String token) {
+		Long userId = userToken.tokenVerify(token);
+		User user = userRepository.findByUserId(userId)
+				.orElseThrow(() -> new UserException(environment.getProperty("note.getUnarchive")));
+		List<Notes> userNotes = (List<Notes>) user.getNotes().stream().filter(data -> data.isArchive() ==false && data.isPin()==false)
+				.collect(Collectors.toList());
+		System.out.println(userNotes);
+		return userNotes;
+	}
+
+	
+
+
+	@Override
+	public Response deleteNotes(Long noteId, String token) {
+		Long userId = userToken.tokenVerify(token);
+		Optional<User> user = userRepository.findByUserId(userId);
+		if (user.isPresent()) {
+			Optional<Notes> notes = noteRepository.findById(noteId);
+			System.out.println(notes.get().toString());
+			System.out.println("notes"+notes.get().isTrash());
+			if (notes.get().isTrash()) {
+				System.out.println("notes"+notes.get().isTrash());
+				noteRepository.delete(notes.get());
+//				redisService.deleteMap("redisKey",noteId);
+				System.out.println("mohitId"+noteId);
+//				noteRepository.save(notes);
+				elasticImpl.deleteNote(noteId);
+				response = StatusHelper.statusResponseInfo(environment.getProperty("note.delete"), 600);
+				return response;
+			}
+			else
+			{
+				response = StatusHelper.statusResponseInfo(environment.getProperty("note is not deleted"), 500);
+				return response;	
+			}
+			
+		}
+
+		response = StatusHelper.statusResponseInfo(environment.getProperty("user not found"), 600);
+		return response;
+	}
+
+	@Override
+	public Response addColaboratorToNote(String token, Long noteId, String emailId) {
+//		Email colabEmail=new Email();
+		try {
+			System.out.println("start");
+		Long userId=userToken.tokenVerify(token);
+		System.out.println(userId);
+		Optional<User> user=userRepository.findByUserId(userId);
+		Optional<User> owner=userRepository.findById(userId);
+		Optional<User> users=userRepository.findByEmailId(emailId);//user
+		System.out.println("this--->"+users);
+		if(!user.isPresent())
+			throw new EmailException(100,environment.getProperty("emailid.invalid"));
+		Notes  note=noteRepository.findByNoteId(noteId);
+   System.out.println(""+note);
+		if(note==null)
+		{
+			throw new NoteException(202,environment.getProperty("note.not.present"));
+		}
+		
+		if(user.get().getCollaboratedNote().contains(note))
+		throw new NoteException(-100,"Note.exist");
+		
+		users.get().getCollaboratedNote().add(note);
+		System.out.println(users);
+		note.getCollaborateUser().add(users.get());
+		System.out.println(note);
+		userRepository.save(users.get());
+		noteRepository.save(note);
+		response=StatusHelper.statusResponseInfo(environment.getProperty("note.colaborated"),700);
+		}
+		catch (Exception e) {
+			// TODO: handle exception
+			System.out.println("exception--->"+e);
+		}
+		return response;
+	}
+
+	@Override
+	public Response removeColaboratorToNote(String token, Long noteId, String emailId) {
+		try {
+		System.out.println("start");
+		Long userId=userToken.tokenVerify(token);
+		System.out.println(userId);
+		Optional<User> user=userRepository.findByUserId(userId);
+		Optional<User> owner=userRepository.findById(userId);
+		Optional<User> users=userRepository.findByEmailId(emailId);//user
+		System.out.println("this--->"+users);
+		if(!user.isPresent())
+			throw new EmailException(100,environment.getProperty("emailid.invalid"));
+		Notes  note=noteRepository.findByNoteId(noteId);
+        System.out.println(""+note);
+		if(note==null)
+		{
+			throw new NoteException(202,environment.getProperty("note.not.present"));
+		}
+		
+		if(user.get().getCollaboratedNote().contains(note))
+		throw new NoteException(-100,"Note.exist");
+		
+		users.get().getCollaboratedNote().remove(note);
+		System.out.println(users);
+		note.getCollaborateUser().remove(users.get());
+		System.out.println(note);
+		userRepository.save(users.get());
+		noteRepository.save(note);
+		response=StatusHelper.statusResponseInfo(environment.getProperty("note.colaborated.remove"),700);
+		}
+		catch (Exception e) {
+			// TODO: handle exception
+			System.out.println("exception--->"+e);
+		}
+		return response;	
+	}
+
+	@Override
+	public Set<Notes> getColaborate(String token) {
+	Long userId=userToken.tokenVerify(token);
+	Optional<User> user=userRepository.findByUserId(userId);
+	Set<Notes> userColaborator=user.get().getCollaboratedNote();
+	System.out.println(userColaborator);
+    return userColaborator;
+	}
+	
+
+
+	@Override
+	public Set<User> getColaborateNotes(String token, Long noteId) {
+	Long userId=userToken.tokenVerify(token);
+	Optional<User> user=userRepository.findByUserId(userId);
+	Notes note=noteRepository.findByNoteId(noteId);
+	Set<User> noteCollaborate=note.getCollaborateUser();
+		return noteCollaborate;
+	}
+
+	@Override
+	public Response setColourToNote(String token, Long noteId,String colour) throws IllegalArgumentException {
+	Long userId=userToken.tokenVerify(token);
+	Optional<User> user=userRepository.findByUserId(userId);
+	
+	if(!user.isPresent())
+	{
+	throw new EmailException(100,environment.getProperty("emailid.invalid"));	
+	}
+	Notes note=noteRepository.findByNoteId(noteId);
+	if(note==null)
+	{
+	throw new NoteException(200,environment.getProperty("note.not.present"));
+	}
+	note.setColour(colour);
+	noteRepository.save(note);
+	
+	response=StatusHelper.statusResponseInfo(environment.getProperty("colour.set.successful"),200);
+	return response;
+	}
+
+@Override
+public Response setReminderToNote(String token, Long noteId, String reminder) {
+Long userId=userToken.tokenVerify(token);
+Optional<User> user=userRepository.findByUserId(userId);
+if(!user.isPresent())
+{
+throw new UserException(200,environment.getProperty("user.invalid"));
+}
+Notes note=noteRepository.findByNoteId(noteId);
+if(note==null)
+{
+throw new NoteException(200,environment.getProperty("note.invalid"));
+}
+note.setReminder(reminder);
+noteRepository.save(note);
+			
+response=StatusHelper.statusResponseInfo("reminder set successfully",100);	
+return response;
+}
+
+@Override
+public Response removeReminder(String token, Long noteId) {
+	System.out.println("note"+noteId);
+Long userId=userToken.tokenVerify(token);
+Optional<User> user=userRepository.findByUserId(userId);
+if(!user.isPresent())
+
+	throw new UserException(100,environment.getProperty("user.inavlid"));
+
+Notes note=noteRepository.findByNoteId(noteId);
+if(note==null)
+{
+	throw new NoteException(100,environment.getProperty("note.invalide"));
+}
+String reminders=note.getReminder();
+if(reminders==null)
+{
+	throw new NoteException(100,environment.getProperty("note invalid"));
+}
+
+//note.getReminder().remove(reminders);
+
+note.setReminder(null);
+noteRepository.save(note);
+response=StatusHelper.statusResponseInfo(environment.getProperty("reminder.removed"),100);
+return response;
+
+}
+
+@Override
+public String getReminder(String token,Long noteId) {
+	Long userId=userToken.tokenVerify(token);
+	Optional<User> user=userRepository.findByUserId(userId);
+if(!user.isPresent())
+{
+	throw new UserException(100,environment.getProperty("user invalid"));
+	}
+Notes note=noteRepository.findByNoteId(noteId);
+if(note==null)
+{
+	throw new NoteException(200,environment.getProperty("note invalid"));
+	}
+String userReminder=note.getReminder();
+
+return userReminder;
+
+}
+
+
+
+
+	
+	
+
+}

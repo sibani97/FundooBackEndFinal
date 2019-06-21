@@ -1,0 +1,59 @@
+package com.bridgelabz.fundoonotes.elasticsearch;
+
+import java.util.List;
+import java.util.Map;
+
+import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.action.index.IndexResponse;
+import org.elasticsearch.client.RequestOptions;
+import org.elasticsearch.client.RestHighLevelClient;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import com.bridgelabz.fundoonotes.notes.model.Notes;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+public class ElasticsearchServiceImpl implements ElasticsearchService{
+	@Autowired
+	RestHighLevelClient client;
+	@Autowired
+	ObjectMapper objectMapper;
+	
+private String INDEX="noteIndex";
+private String TYPE="noteType";
+
+	@Override
+	public Notes createNote(Notes note) {
+	Map<String, Object> datamap = objectMapper.convertValue(note, Map.class);
+
+    IndexRequest indexRequest = new IndexRequest(INDEX, TYPE,String.valueOf(note.getNoteId()))
+                .source(datamap);
+
+    IndexResponse indexResponse = client.index(indexRequest, RequestOptions.DEFAULT);
+
+        return indexResponse
+                .getResult()
+                .name();
+   
+		
+		
+	}
+
+	@Override
+	public Notes updateNotes(Notes note) {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	@Override
+	public void deleteNote(Long noteId) {
+		// TODO Auto-generated method stub
+		
+	}
+
+	@Override
+	public List<Notes> searchNotes(String quary, Long noteId) {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+}
